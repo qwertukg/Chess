@@ -1,89 +1,68 @@
-# Secret Prelude Chess
+AlphaZero-lite Chess (PyTorch)
+==============================
 
-Веб‑шахматы с «секретной прелюдией» из N ходов для каждого игрока. Все ходы — только мышью.
+Overview
+--------
+This project trains a lightweight AlphaZero-style agent for chess using:
+- a policy+value network (PyTorch),
+- batched MCTS,
+- self-play data generation,
+- replay buffer training,
+- simple evaluation vs a baseline GreedyBot.
 
-## Запуск
+Quickstart
+----------
+1) Create and activate a virtual environment.
+2) Install dependencies:
+   `pip install -r requirements.txt`
+3) (Recommended) Install NumPy to avoid warnings and enable some ops:
+   `pip install numpy`
+4) Run training:
+   `python azlite_chess_train.py`
 
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn backend.main:app --reload
-```
+Checkpoints / Resume
+--------------------
+Training auto-saves to `out_azlite/`:
+- `latest.pt` (most recent)
+- `ckpt_iter_<N>.pt`
 
-Откройте `http://localhost:8000`.
+On startup, the script automatically resumes from `latest.pt` if it exists.
+This includes model, optimizer, replay buffer, RNG state, and iteration index.
 
-### Stockfish (опционально)
-Укажите путь к движку через `STOCKFISH_PATH`:
+Configuration
+-------------
+All hyperparameters live in the `Config` dataclass near the top of
+`azlite_chess_train.py`. Key groups:
+- MCTS: `mcts_sims`, `cpuct`, `dirichlet_alpha`, `dirichlet_eps`, `mcts_eval_batch`
+- Self-play: `games_per_iter`, `max_game_plies`, `temperature_moves`
+- Training: `replay_max`, `train_steps_per_iter`, `batch_size`, `lr`, `weight_decay`
+- Model: `channels`, `res_blocks`
+- Eval: `eval_games`, `eval_every_iters`
+- Logging: `log_train_every`
 
-```bash
-export STOCKFISH_PATH=/path/to/stockfish
-```
+Logs
+----
+Each iteration logs:
+- self-play sample counts and aggregate self-play stats
+- training loss (policy/value), gradient norm, entropy/top-1 for target/predicted policy,
+  and value mean/std vs targets
+- eval vs GreedyBot (W/D/L, score, estimated Elo)
+- timing breakdown (self-play/train/eval/save/total)
 
-Если переменная не задана, бот ходит случайно допустимыми ходами.
+Troubleshooting
+---------------
+NumPy warning:
+- If you see "Failed to initialize NumPy", install NumPy:
+  `pip install numpy`
 
-## Правила прелюдии (сервер — авторитет)
+MPS (Apple GPU) notes:
+- Dirichlet sampling is not implemented on MPS, so the code falls back to CPU
+  for that step only.
+- If other MPS ops fail, you can set:
+  `PYTORCH_ENABLE_MPS_FALLBACK=1`
+  This uses CPU fallback for unsupported ops (slower).
 
-- Игроки формируют списки `W[0..N-1]` и `B[0..N-1]`.
-- Сервер применяет ходы из стартовой позиции:
-  1) Пробует `W[i]`. Если ход нелегален — белые прекращают.
-  2) Пробует `B[i]`. Если ход нелегален — чёрные прекращают.
-  3) Если один игрок «сломался», второй продолжает оставшиеся ходы, пока они легальны.
-- Итоговая позиция становится стартом открытой игры.
-- В раскрытии показываются применённые ходы и причина остановки (если была).
-
-## WebSocket протокол
-
-Endpoint: `/ws/{roomId}?playerId=...`
-
-Сообщения клиент → сервер:
-
-```json
-{ "type": "prelude_move_add", "uci": "e2e4" }
-{ "type": "prelude_move_undo" }
-{ "type": "prelude_move_clear" }
-{ "type": "prelude_ready" }
-{ "type": "move", "uci": "e2e4" }
-{ "type": "resign" }
-```
-
-Сообщения сервер → клиент:
-
-```json
-{ "type": "join", "playerId": "...", "color": "white", "state": { ... } }
-{ "type": "state", "state": { ... } }
-{ "type": "prelude_plan", "moves": ["e2e4", "g1f3"] }
-{ "type": "prelude_reveal", "result": { ... } }
-{ "type": "move", "uci": "e2e4", "san": "e4", "fen": "..." }
-{ "type": "illegal_move", "reason": "..." }
-{ "type": "game_over", "reason": "resign", "winner": "white" }
-```
-
-### `state` (публичное состояние комнаты)
-
-```json
-{
-  "roomId": "room_...",
-  "mode": "pvp",
-  "n": 4,
-  "state": "prelude",
-  "createdAt": 1738327800.0,
-  "players": {
-    "player_...": { "color": "white" }
-  },
-  "fen": "...",
-  "prelude": { "readyWhite": false, "readyBlack": false }
-}
-```
-
-## Тесты
-
-```bash
-pytest
-```
-
-## Примечания
-
-- Валидация прелюдии на сервере делается через «превью» доску игрока (только его ходы).
-- Во время прелюдии половина соперника скрыта и неактивна на клиенте.
-- Состояние комнат хранится в памяти (MVP).
+Stopping
+--------
+Stop with Ctrl+C. The latest checkpoint is saved every `save_every_iters`
+iterations, so you can restart without losing progress.
