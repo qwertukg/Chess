@@ -57,6 +57,7 @@ All hyperparameters live in the `Config` dataclass near the top of
 - Model: `channels`, `res_blocks`
 - Eval: `eval_games`, `eval_every_iters`
 - Logging: `log_train_every`
+- Outcome shaping: `draw_value_scale`, `material_value_scale`, `resign_*`
 
 Logs
 ----

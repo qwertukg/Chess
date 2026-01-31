@@ -53,12 +53,18 @@ class Config:
     cpuct: float = 1.5
     dirichlet_alpha: float = 0.3
     dirichlet_eps: float = 0.25
-    temperature_moves: int = 12
+    temperature_moves: int = 20
     mcts_eval_batch: int = 64  # сколько листьев прогоняем сетью за один батч
 
     # Self-play / training loop
     games_per_iter: int = 12
     max_game_plies: int = 300
+    # Outcome shaping / efficiency
+    draw_value_scale: float = 0.2  # масштаб "материального" сигнала для ничьих/усечений
+    material_value_scale: float = 6.0  # чем больше, тем слабее влияние материала
+    resign_enabled: bool = True
+    resign_material_threshold: float = 8.0  # разница материала (в пешках) для досрочного "resign"
+    resign_min_plies: int = 40  # не сдаваться слишком рано
 
     # Replay / training
     replay_max: int = 200000
@@ -351,6 +357,53 @@ PIECE_VALUE = {
 }
 
 
+def material_balance(board: chess.Board) -> float:
+    """Материальный баланс: белые - чёрные, в пешечных единицах."""
+    diff = 0.0
+    for p, v in PIECE_VALUE.items():
+        if v == 0:
+            continue
+        diff += len(board.pieces(p, chess.WHITE)) * v
+        diff -= len(board.pieces(p, chess.BLACK)) * v
+    return diff
+
+
+def drawish_value(board: chess.Board) -> float:
+    """Небольшой "материальный" сигнал для ничьих/усечений, чтобы обучать value."""
+    if CFG.draw_value_scale <= 0 or CFG.material_value_scale <= 0:
+        return 0.0
+    diff = material_balance(board)
+    return float(CFG.draw_value_scale * math.tanh(diff / CFG.material_value_scale))
+
+
+def shaped_game_value_white(board: chess.Board, truncated: bool) -> float:
+    """
+    Возвращает value с точки зрения белых.
+    Для ничьих/усечений даём слабый материал-сигнал.
+    """
+    res = board.result(claim_draw=True)
+    if res == "1-0":
+        return 1.0
+    if res == "0-1":
+        return -1.0
+    if board.is_stalemate() or board.is_insufficient_material():
+        return 0.0
+    if truncated or res == "1/2-1/2":
+        return drawish_value(board)
+    return 0.0
+
+
+def resign_result_from_material(board: chess.Board) -> Optional[float]:
+    if not CFG.resign_enabled:
+        return None
+    diff = material_balance(board)
+    if diff >= CFG.resign_material_threshold:
+        return 1.0
+    if diff <= -CFG.resign_material_threshold:
+        return -1.0
+    return None
+
+
 def greedy_bot_move(board: chess.Board) -> chess.Move:
     moves = list(board.legal_moves)
     if not moves:
@@ -597,11 +650,20 @@ def self_play_game(net: PolicyValueNet) -> Tuple[List[Tuple[torch.Tensor, torch.
         "samples_n": 0,
         "z_abs_sum": 0.0,
         "truncated": 0.0,
+        "resigned": 0.0,
         "result": 0.0,
     }
 
     ply = 0
+    resigned_result: Optional[float] = None
     while not board.is_game_over() and ply < CFG.max_game_plies:
+        if ply >= CFG.resign_min_plies:
+            rr = resign_result_from_material(board)
+            if rr is not None:
+                resigned_result = rr
+                stats["resigned"] = 1.0
+                break
+
         root, counts = run_mcts_batched(net, board)
 
         temp = 1.0 if ply < CFG.temperature_moves else 1e-6
@@ -641,8 +703,13 @@ def self_play_game(net: PolicyValueNet) -> Tuple[List[Tuple[torch.Tensor, torch.
         ply += 1
 
     z_white = game_result_white(board)
+    if resigned_result is not None:
+        z_white = resigned_result
     stats["result"] = z_white
-    stats["truncated"] = 0.0 if board.is_game_over() else 1.0
+    stats["truncated"] = 0.0 if (board.is_game_over() or resigned_result is not None) else 1.0
+
+    if resigned_result is None:
+        z_white = shaped_game_value_white(board, truncated=not board.is_game_over())
 
     samples: List[Tuple[torch.Tensor, torch.Tensor, float]] = []
     for s, pi, to_play_white in traj:
@@ -903,6 +970,7 @@ def main():
             samples_n = sum(s["samples_n"] for s in sp_stats)
             z_abs_sum = sum(s["z_abs_sum"] for s in sp_stats)
             trunc = sum(s["truncated"] for s in sp_stats)
+            resigned = sum(s["resigned"] for s in sp_stats)
             wins = sum(1 for s in sp_stats if s["result"] > 0)
             draws = sum(1 for s in sp_stats if s["result"] == 0)
             losses = sum(1 for s in sp_stats if s["result"] < 0)
@@ -914,10 +982,11 @@ def main():
             avg_root_q = root_q_sum / max(1, plies)
             sample_abs = z_abs_sum / max(1, samples_n)
             trunc_rate = trunc / max(1, games)
+            resign_rate = resigned / max(1, games)
 
             print(
                 f"[iter {it}] selfplay stats: W/D/L={wins}/{draws}/{losses} "
-                f"trunc={trunc_rate:.2f} avg_plies={avg_plies:.1f} "
+                f"trunc={trunc_rate:.2f} resign={resign_rate:.2f} avg_plies={avg_plies:.1f} "
                 f"legal={avg_legal:.1f} ent={avg_ent:.3f} top1={avg_top1:.3f} "
                 f"root_q={avg_root_q:.3f} z_abs={sample_abs:.3f}"
             )
