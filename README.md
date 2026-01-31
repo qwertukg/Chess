@@ -20,6 +20,21 @@ Quickstart
 4) Run training:
    `python azlite_chess_train.py`
 
+Windows (RTX) Setup
+-------------------
+1) Install Python 3.12 x64.
+2) Create and activate venv:
+   `py -3.12 -m venv .venv`
+   `.\\.venv\\Scripts\\activate`
+3) Install CUDA build of PyTorch (pick the CUDA version shown on the official PyTorch
+   "Start Locally" page for Windows/Pip/Python/CUDA):
+   `pip uninstall -y torch torchvision torchaudio`
+   `pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu12x`
+4) Verify GPU is detected:
+   `python -c "import torch; print(torch.__version__); print(torch.version.cuda); print(torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else None)"`
+5) Run training:
+   `python azlite_chess_train.py`
+
 Checkpoints / Resume
 --------------------
 Training auto-saves to `out_azlite/`:
